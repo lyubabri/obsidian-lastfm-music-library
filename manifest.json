@@ -1,7 +1,7 @@
 {
   "id": "lastfm-music-library",
   "name": "Last.fm Music Library",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.5.0",
   "description": "Pulls scrobbles from Last.fm and creates/updates unique track notes with play counts and history",
   "author": "lyubabri",

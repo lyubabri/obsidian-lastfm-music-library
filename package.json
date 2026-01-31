@@ -1,6 +1,6 @@
 {
 	"name": "lastfm-music-library",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Pulls scrobbles from Last.fm and creates/updates unique track notes with play counts and history",
 	"main": "main.js",
 	"type": "module",
