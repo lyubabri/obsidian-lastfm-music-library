@@ -5,7 +5,7 @@ export interface LastFmSettings {
   apiKey: string;
   username: string;
   folder: string;
-  historyFilePath: string;
+  historyFolderPath: string;     // ← changed to folder
   autoSyncEnabled: boolean;
 }
 
@@ -13,7 +13,7 @@ export const DEFAULT_SETTINGS: LastFmSettings = {
   apiKey: "",
   username: "",
   folder: "Music Library",
-  historyFilePath: "",
+  historyFolderPath: "",          // auto-generated as folder/History
   autoSyncEnabled: false,
 };
 
@@ -72,14 +72,14 @@ export class LastFmSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("History file path")
-      .setDesc("Full path to history file (e.g., Music Library/History.md). Leave empty to auto-generate.")
+      .setName("History folder")
+      .setDesc("Folder where yearly history files will be created (History-YYYY.md). Leave empty to auto-create inside notes folder.")
       .addText((text) =>
         text
           .setPlaceholder("Leave empty for auto-generation")
-          .setValue(this.plugin.settings.historyFilePath)
+          .setValue(this.plugin.settings.historyFolderPath)
           .onChange(async (value) => {
-            this.plugin.settings.historyFilePath = value.trim();
+            this.plugin.settings.historyFolderPath = value.trim();
             await this.plugin.saveSettings();
           })
       );

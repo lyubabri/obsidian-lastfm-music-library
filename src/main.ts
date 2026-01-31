@@ -100,45 +100,69 @@ export default class LastFmMusicLibraryPlugin extends Plugin {
     const folderPath = normalizePath(folder);
     await this.app.vault.createFolder(folderPath).catch(() => {});
 
-    if (!this.settings.historyFilePath?.trim()) {
-      this.settings.historyFilePath = normalizePath(`${folder}/History.md`);
+    let historyFolder: string;
+
+    if (this.settings.historyFolderPath.trim()) {
+      historyFolder = normalizePath(this.settings.historyFolderPath);
+      const folderExists = this.app.vault.getAbstractFileByPath(historyFolder);
+      if (!folderExists) {
+        new Notice(`History folder "${historyFolder}" not found. Create it manually.`);
+        this.updateStatusBar("History folder missing");
+        return;
+      }
+    } else {
+      historyFolder = normalizePath(`${folder}/History`);
+      await this.app.vault.createFolder(historyFolder).catch(() => {});
+      this.settings.historyFolderPath = historyFolder;
       await this.saveSettings();
     }
 
-    const historyPath = normalizePath(this.settings.historyFilePath);
     let lastFetchedTimestamp = 0;
     let fromTimestamp = 0;
+    let found = false;
 
-    const historyFile = this.app.vault.getAbstractFileByPath(historyPath);
-    if (historyFile instanceof TFile) {
-      const content = await this.app.vault.read(historyFile);
-      const lines = content.split("\n");
+    const currentYear = new Date().getFullYear();
 
-      for (const line of lines) {
-        const match = line.match(/^- (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
-        if (match?.[1]) {
-          const ts = this.localISOToTimestamp(match[1]);
-          if (ts) {
-            lastFetchedTimestamp = ts;
-            fromTimestamp = ts + 1;
-            this.updateStatusBar(`Syncing after ${match[1]}`);
-            console.debug(`Last recorded: ${match[1]} (${ts}), requesting from ${fromTimestamp}`);
-            break;
+    for (let year = currentYear; year >= currentYear - 20; year--) {
+      const fileName = `History-${year}.md`;
+      const path = normalizePath(`${historyFolder}/${fileName}`);
+      const file = this.app.vault.getAbstractFileByPath(path);
+
+      if (file instanceof TFile) {
+        const content = await this.app.vault.read(file);
+        const lines = content.split("\n");
+
+        for (const line of lines) {
+          const match = line.match(/^- (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
+          if (match?.[1]) {
+            const ts = this.localISOToTimestamp(match[1]);
+            if (ts) {
+              lastFetchedTimestamp = ts;
+              fromTimestamp = ts + 1;
+              this.updateStatusBar(`Syncing after ${match[1]} (${fileName})`);
+              console.debug(`Latest entry found in ${fileName}: ${match[1]} → from ${fromTimestamp}`);
+              found = true;
+              break;
+            }
           }
         }
+        if (found) break;
       }
     }
 
-    if (fromTimestamp === 0) {
-      this.updateStatusBar("Full sync (last 200 tracks)");
+    if (!found) {
+      this.updateStatusBar("No history — fetching last 200 tracks");
+      console.debug("No history files — fetching recent without 'from', limited to page 1");
     }
 
     const allNewTracks: LastFmTrack[] = [];
     const limit = 200;
     let page = 1;
     let totalPages = 1;
+    let attempts = 0;
+    const maxAttempts = 3;
 
-    while (page <= totalPages) {
+    fetchLoop: while (page <= totalPages && attempts < maxAttempts) {
       const params = new URLSearchParams({
         method: "user.getrecenttracks",
         user: username,
@@ -148,9 +172,12 @@ export default class LastFmMusicLibraryPlugin extends Plugin {
         page: page.toString(),
       });
 
-      if (fromTimestamp > 0) params.append("from", fromTimestamp.toString());
+      if (found) {
+        params.append("from", fromTimestamp.toString());
+      }
 
       const url = `https://ws.audioscrobbler.com/2.0/?${params}`;
+      console.debug(`Sending request (page ${page}): ${url}`);
 
       try {
         const resp = await requestUrl({ url, method: "GET" });
@@ -160,6 +187,11 @@ export default class LastFmMusicLibraryPlugin extends Plugin {
 
         if (page === 1 && data.recenttracks?.["@attr"]?.totalPages) {
           totalPages = Number(data.recenttracks["@attr"].totalPages);
+
+          if (!found) {
+            totalPages = 1;
+            console.debug("No history — limiting to page 1 (last 200 tracks)");
+          }
         }
 
         let tracks = data.recenttracks?.track ?? [];
@@ -169,11 +201,19 @@ export default class LastFmMusicLibraryPlugin extends Plugin {
         allNewTracks.push(...tracks);
         page++;
 
-        if (page <= totalPages) await new Promise(r => setTimeout(r, 1200));
+        if (page <= totalPages) await new Promise(r => setTimeout(r, 2000));
       } catch (err: any) {
-        console.error("Sync error:", err);
-        new Notice(`Sync error: ${err.message}`);
-        this.updateStatusBar("Sync error");
+        console.error("Sync attempt failed:", err);
+        if ((err.status === 500 || err.status === 429) && attempts < maxAttempts - 1) {
+          attempts++;
+          const delay = err.status === 429 ? 30000 : 5000;
+          console.warn(`Last.fm error ${err.status} — retry ${attempts}/${maxAttempts} in ${delay/1000}s...`);
+          this.updateStatusBar(`Last.fm error ${err.status} — retrying...`);
+          await new Promise(r => setTimeout(r, delay));
+          continue fetchLoop;
+        }
+        new Notice(`Sync failed: Last.fm returned ${err.status || "unknown error"}. Try again later.`);
+        this.updateStatusBar("Sync failed");
         return;
       }
     }
@@ -278,6 +318,46 @@ export default class LastFmMusicLibraryPlugin extends Plugin {
     new Notice(msg);
   }
 
+  async appendToHistory(name: string, iso: string): Promise<void> {
+    const year = iso.slice(0, 4);
+    const fileName = `History-${year}.md`;
+    const folder = this.settings.historyFolderPath.trim()
+      ? normalizePath(this.settings.historyFolderPath)
+      : normalizePath(`${this.settings.folder}/History`);
+
+    const path = normalizePath(`${folder}/${fileName}`);
+    const entry = `- ${iso} — [[${name}]]`;
+
+    let content = "# History\n\n";
+
+    try {
+      content = await this.app.vault.adapter.read(path);
+    } catch {
+      await this.app.vault.createFolder(folder).catch(() => {});
+    }
+
+    if (content.includes(entry)) return;
+
+    if (!content.includes("# History")) {
+      content = "# History\n\n" + content.trimStart();
+    }
+
+    const lines = content.split("\n");
+    let insertAt = lines.findIndex(l => l.trim() === "# History") + 1;
+    while (insertAt < lines.length && lines[insertAt]?.trim() === "") {
+      insertAt++;
+    }
+
+    lines.splice(insertAt, 0, entry);
+
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!file) {
+      await this.app.vault.create(path, lines.join("\n"));
+    } else {
+      await this.app.vault.modify(file as TFile, lines.join("\n"));
+    }
+  }
+
   private extractBestCover(images?: LastFmTrack["image"]): string {
     if (!images?.length) return "";
     const img =
@@ -317,34 +397,6 @@ cover_url: ${g.coverUrl}
     content = content.replace(/play_count:\s*"?\d+"?/, `play_count: "${count}"`);
     content = content.replace(/last_listened_at:\s*.+/, `last_listened_at: ${latestIso}`);
     return content;
-  }
-
-  async appendToHistory(name: string, iso: string): Promise<void> {
-    const path = normalizePath(this.settings.historyFilePath);
-    const entry = `- ${iso} — [[${name}]]`;
-
-    let content = "# History\n\n";
-
-    try {
-      content = await this.app.vault.adapter.read(path);
-    } catch {}
-
-    if (content.includes(entry)) return;
-
-    if (!content.includes("# History")) {
-      content = "# History\n\n" + content.trimStart();
-    }
-
-    const lines = content.split("\n");
-
-    let insertAt = lines.findIndex(l => l.trim() === "# History") + 1;
-    while (insertAt < lines.length && lines[insertAt]?.trim() === "") {
-      insertAt++;
-    }
-
-    lines.splice(insertAt, 0, entry);
-
-    await this.app.vault.adapter.write(path, lines.join("\n"));
   }
 
   private timestampToLocalISO(ts: number): string {
